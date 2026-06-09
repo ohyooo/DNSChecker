@@ -50,17 +50,6 @@ jobs:
 
           - os-name: linux
             runner: ubuntu-latest
-            arch: x86
-            rust-target: i686-unknown-linux-gnu
-            artifact-debug: src-tauri/target/i686-unknown-linux-gnu/debug/dnschecker
-            artifact-release: src-tauri/target/i686-unknown-linux-gnu/release/dnschecker
-            artifact-bundles: |
-              src-tauri/target/i686-unknown-linux-gnu/release/bundle/deb/*.deb
-              src-tauri/target/i686-unknown-linux-gnu/release/bundle/rpm/*.rpm
-              src-tauri/target/i686-unknown-linux-gnu/release/bundle/appimage/*.AppImage
-
-          - os-name: linux
-            runner: ubuntu-latest
             arch: x64
             rust-target: x86_64-unknown-linux-gnu
             artifact-debug: src-tauri/target/x86_64-unknown-linux-gnu/debug/dnschecker
@@ -69,17 +58,6 @@ jobs:
               src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/deb/*.deb
               src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/rpm/*.rpm
               src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/appimage/*.AppImage
-
-          - os-name: linux
-            runner: ubuntu-latest
-            arch: arm
-            rust-target: aarch64-unknown-linux-gnu
-            artifact-debug: src-tauri/target/aarch64-unknown-linux-gnu/debug/dnschecker
-            artifact-release: src-tauri/target/aarch64-unknown-linux-gnu/release/dnschecker
-            artifact-bundles: |
-              src-tauri/target/aarch64-unknown-linux-gnu/release/bundle/deb/*.deb
-              src-tauri/target/aarch64-unknown-linux-gnu/release/bundle/rpm/*.rpm
-              src-tauri/target/aarch64-unknown-linux-gnu/release/bundle/appimage/*.AppImage
 
           - os-name: macos
             runner: macos-latest
