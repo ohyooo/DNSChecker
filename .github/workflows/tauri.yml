@@ -89,7 +89,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
@@ -103,7 +103,7 @@ jobs:
             rpm
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: 24
           cache: npm
@@ -132,7 +132,7 @@ jobs:
         run: npx tauri build --debug --target ${{ matrix.rust-target }}
 
       - name: Upload debug executable
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: dnschecker-${{ matrix.os-name }}-${{ matrix.arch }}-debug
           path: ${{ matrix.artifact-debug }}
@@ -142,14 +142,14 @@ jobs:
         run: npx tauri build --target ${{ matrix.rust-target }}
 
       - name: Upload release executable
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: dnschecker-${{ matrix.os-name }}-${{ matrix.arch }}-release
           path: ${{ matrix.artifact-release }}
           if-no-files-found: error
 
       - name: Upload release bundles
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: dnschecker-${{ matrix.os-name }}-${{ matrix.arch }}-bundles
           path: ${{ matrix.artifact-bundles }}
