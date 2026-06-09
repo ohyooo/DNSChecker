@@ -111,7 +111,7 @@ jobs:
         run: npm run build:frontend
 
       - name: Build debug app
-        run: npx tauri build --debug --target ${{ matrix.rust-target }}
+        run: npx tauri build --debug --no-bundle --target ${{ matrix.rust-target }}
 
       - name: Upload debug executable
         uses: actions/upload-artifact@v7
