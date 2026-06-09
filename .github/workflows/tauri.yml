@@ -1,4 +1,4 @@
-name: Tauri
+name: Build
 
 on:
   push:
@@ -107,11 +107,20 @@ jobs:
         with:
           node-version: 24
           cache: npm
+          cache-dependency-path: package-lock.json
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.rust-target }}
+
+      - name: Cache Rust dependencies and build output
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            src-tauri -> target
+          key: ${{ matrix.os-name }}-${{ matrix.arch }}-${{ matrix.rust-target }}
+          cache-on-failure: true
 
       - name: Install dependencies
         run: npm ci
