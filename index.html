@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>DNSChecker</title>
+  </head>
+  <body>
+    <main>
+      <form id="form">
+        <input id="servers" name="servers" type="hidden" />
+        <section class="dns-table-wrap" aria-label="DNS 列表">
+          <table class="dns-table">
+            <thead>
+              <tr>
+                <th class="server-col">DNS 列表</th>
+                <th class="line-col">行号</th>
+                <th class="time-col">耗时(ms)</th>
+                <th class="result-col">DNS 结果</th>
+              </tr>
+            </thead>
+            <tbody id="dnsRows"></tbody>
+          </table>
+        </section>
+        <section class="settings">
+          <label>检测域名<input name="domain" value="google.com" /></label>
+          <label>记录类型
+            <select name="type">
+              <option>A</option><option>AAAA</option><option>CNAME</option><option>MX</option><option>NS</option><option>TXT</option>
+            </select>
+          </label>
+          <label>预期结果<input name="expected" placeholder="可为空，多个用英文逗号分隔" /></label>
+          <label>Bootstrap DNS<input name="bootstrap" placeholder="可为空；多个用空格、逗号或换行分隔" /></label>
+          <label>超时<input name="timeout" value="5s" /></label>
+          <button id="checkButton" type="submit">检测</button>
+        </section>
+        <label id="successListWrap" class="success-list">
+          <span class="success-title">成功 DNS <span id="successCount"></span></span>
+          <textarea id="successList" readonly></textarea>
+        </label>
+      </form>
+    </main>
+    <script type="module" src="/ui/main.ts"></script>
+  </body>
+</html>

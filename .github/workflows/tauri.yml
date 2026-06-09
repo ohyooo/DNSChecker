@@ -1,0 +1,147 @@
+name: Tauri
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: ${{ matrix.os-name }} ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os-name: windows
+            runner: windows-latest
+            arch: x86
+            rust-target: i686-pc-windows-msvc
+            artifact-debug: src-tauri/target/i686-pc-windows-msvc/debug/dnschecker.exe
+            artifact-release: src-tauri/target/i686-pc-windows-msvc/release/dnschecker.exe
+            artifact-bundles: |
+              src-tauri/target/i686-pc-windows-msvc/release/bundle/msi/*.msi
+              src-tauri/target/i686-pc-windows-msvc/release/bundle/nsis/*.exe
+
+          - os-name: windows
+            runner: windows-latest
+            arch: x64
+            rust-target: x86_64-pc-windows-msvc
+            artifact-debug: src-tauri/target/x86_64-pc-windows-msvc/debug/dnschecker.exe
+            artifact-release: src-tauri/target/x86_64-pc-windows-msvc/release/dnschecker.exe
+            artifact-bundles: |
+              src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi
+              src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
+
+          - os-name: windows
+            runner: windows-latest
+            arch: arm
+            rust-target: aarch64-pc-windows-msvc
+            artifact-debug: src-tauri/target/aarch64-pc-windows-msvc/debug/dnschecker.exe
+            artifact-release: src-tauri/target/aarch64-pc-windows-msvc/release/dnschecker.exe
+            artifact-bundles: |
+              src-tauri/target/aarch64-pc-windows-msvc/release/bundle/msi/*.msi
+              src-tauri/target/aarch64-pc-windows-msvc/release/bundle/nsis/*.exe
+
+          - os-name: linux
+            runner: ubuntu-latest
+            arch: x86
+            rust-target: i686-unknown-linux-gnu
+            artifact-debug: src-tauri/target/i686-unknown-linux-gnu/debug/dnschecker
+            artifact-release: src-tauri/target/i686-unknown-linux-gnu/release/dnschecker
+            artifact-bundles: |
+              src-tauri/target/i686-unknown-linux-gnu/release/bundle/deb/*.deb
+              src-tauri/target/i686-unknown-linux-gnu/release/bundle/rpm/*.rpm
+              src-tauri/target/i686-unknown-linux-gnu/release/bundle/appimage/*.AppImage
+
+          - os-name: linux
+            runner: ubuntu-latest
+            arch: x64
+            rust-target: x86_64-unknown-linux-gnu
+            artifact-debug: src-tauri/target/x86_64-unknown-linux-gnu/debug/dnschecker
+            artifact-release: src-tauri/target/x86_64-unknown-linux-gnu/release/dnschecker
+            artifact-bundles: |
+              src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/deb/*.deb
+              src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/rpm/*.rpm
+              src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/appimage/*.AppImage
+
+          - os-name: linux
+            runner: ubuntu-latest
+            arch: arm
+            rust-target: aarch64-unknown-linux-gnu
+            artifact-debug: src-tauri/target/aarch64-unknown-linux-gnu/debug/dnschecker
+            artifact-release: src-tauri/target/aarch64-unknown-linux-gnu/release/dnschecker
+            artifact-bundles: |
+              src-tauri/target/aarch64-unknown-linux-gnu/release/bundle/deb/*.deb
+              src-tauri/target/aarch64-unknown-linux-gnu/release/bundle/rpm/*.rpm
+              src-tauri/target/aarch64-unknown-linux-gnu/release/bundle/appimage/*.AppImage
+
+          - os-name: macos
+            runner: macos-latest
+            arch: arm
+            rust-target: aarch64-apple-darwin
+            artifact-debug: src-tauri/target/aarch64-apple-darwin/debug/dnschecker
+            artifact-release: src-tauri/target/aarch64-apple-darwin/release/dnschecker
+            artifact-bundles: |
+              src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
+              src-tauri/target/aarch64-apple-darwin/release/bundle/macos/*.app
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            rpm
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust-target }}
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build frontend
+        run: npm run build:frontend
+
+      - name: Build debug app
+        run: npx tauri build --debug --target ${{ matrix.rust-target }}
+
+      - name: Upload debug executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: dnschecker-${{ matrix.os-name }}-${{ matrix.arch }}-debug
+          path: ${{ matrix.artifact-debug }}
+          if-no-files-found: error
+
+      - name: Build release app
+        run: npx tauri build --target ${{ matrix.rust-target }}
+
+      - name: Upload release executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: dnschecker-${{ matrix.os-name }}-${{ matrix.arch }}-release
+          path: ${{ matrix.artifact-release }}
+          if-no-files-found: error
+
+      - name: Upload release bundles
+        uses: actions/upload-artifact@v4
+        with:
+          name: dnschecker-${{ matrix.os-name }}-${{ matrix.arch }}-bundles
+          path: ${{ matrix.artifact-bundles }}
+          if-no-files-found: ignore
