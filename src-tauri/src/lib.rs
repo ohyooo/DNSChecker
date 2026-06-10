@@ -413,7 +413,8 @@ fn split_host_port(value: &str) -> Option<(&str, u16)> {
 }
 
 fn parse_ip_addr(value: &str) -> Result<IpAddr, String> {
-    IpAddr::from_str(value).map_err(|_| format!("invalid bootstrap IP: {value}"))
+    let normalized = value.trim().trim_matches(['[', ']']);
+    IpAddr::from_str(normalized).map_err(|_| format!("invalid bootstrap IP: {value}"))
 }
 
 fn parse_bootstrap_list(input: &str) -> Result<Vec<IpAddr>, String> {
