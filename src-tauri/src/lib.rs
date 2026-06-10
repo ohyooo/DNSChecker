@@ -1,12 +1,22 @@
-use serde::{Deserialize, Deserializer, Serialize};
-use std::{
-    env,
-    path::{Path, PathBuf},
-    process::Command,
+use hickory_resolver::{
+    config::{NameServerConfig, NameServerConfigGroup, ResolverConfig, ResolverOpts},
+    name_server::TokioConnectionProvider,
+    proto::{
+        rr::{RData, RecordType},
+        xfer::Protocol,
+    },
+    TokioResolver,
 };
-use tauri::Manager;
+use serde::{Deserialize, Serialize};
+use std::{
+    net::{IpAddr, SocketAddr},
+    str::FromStr,
+    sync::Arc,
+    time::{Duration, Instant},
+};
+use tokio::{sync::Semaphore, task::JoinSet, time::timeout as tokio_timeout};
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 struct CheckResult {
     #[serde(default)]
     line: u32,
@@ -17,21 +27,14 @@ struct CheckResult {
     type_name: String,
     #[serde(default)]
     duration_ms: f64,
-    #[serde(default, deserialize_with = "null_vec")]
+    #[serde(default)]
     answers: Vec<String>,
-    #[serde(default, deserialize_with = "null_vec")]
+    #[serde(default)]
     expected: Vec<String>,
     matched: Option<bool>,
     status: String,
     error: Option<String>,
     response_code: Option<String>,
-}
-
-fn null_vec<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    Ok(Option::<Vec<String>>::deserialize(deserializer)?.unwrap_or_default())
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -49,125 +52,425 @@ struct ExpandServersResponse {
     error: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+struct ParsedServer {
+    line: u32,
+    raw: String,
+    protocol: String,
+    host: String,
+    port: u16,
+    path: Option<String>,
+    bootstrap: Vec<IpAddr>,
+}
+
 #[tauri::command]
 async fn check_servers(
-    app: tauri::AppHandle,
     servers: String,
     domain: String,
     type_name: String,
     expected: String,
     bootstrap: String,
     timeout: String,
+    concurrency: String,
 ) -> Result<BatchCheckResponse, String> {
-    let output = tauri::async_runtime::spawn_blocking(move || {
-        run_helper(
-            &app,
-            vec![
-                "batch".to_string(),
-                "-servers".to_string(),
-                servers,
-                "-domain".to_string(),
-                domain,
-                "-type".to_string(),
-                type_name,
-                "-expected".to_string(),
-                expected,
-                "-bootstrap".to_string(),
-                bootstrap,
-                "-timeout".to_string(),
-                timeout,
-            ],
-        )
+    let timeout = parse_timeout(&timeout)?;
+    let concurrency = parse_concurrency(&concurrency);
+    let global_bootstrap = parse_bootstrap_list(&bootstrap)?;
+    let expected_values = parse_expected(&expected);
+    let record_type = parse_record_type(&type_name)?;
+    let parsed_servers = parse_servers(&servers, &global_bootstrap)?;
+
+    let total = parsed_servers.len() as u32;
+    let semaphore = Arc::new(Semaphore::new(concurrency));
+    let mut tasks = JoinSet::new();
+
+    for server in parsed_servers {
+        let semaphore = Arc::clone(&semaphore);
+        let domain = domain.clone();
+        let type_name = type_name.clone();
+        let expected_values = expected_values.clone();
+        tasks.spawn(async move {
+            let _permit = semaphore
+                .acquire_owned()
+                .await
+                .map_err(|err| format!("failed to acquire semaphore: {err}"))?;
+            Ok::<CheckResult, String>(
+                check_single_server(
+                    server,
+                    domain,
+                    type_name,
+                    expected_values,
+                    record_type,
+                    timeout,
+                )
+                .await,
+            )
+        });
+    }
+
+    let mut results = Vec::with_capacity(total as usize);
+    let mut ok = 0u32;
+
+    while let Some(joined) = tasks.join_next().await {
+        let result = joined.map_err(|err| format!("DNS task join failed: {err}"))??;
+        if result.status == "ok" {
+            ok += 1;
+        }
+        results.push(result);
+    }
+
+    results.sort_by_key(|item| item.line);
+    Ok(BatchCheckResponse {
+        failed: total.saturating_sub(ok),
+        ok,
+        total,
+        results,
     })
-    .await
-    .map_err(|err| format!("DNS helper task failed: {err}"))??;
-    serde_json::from_str(&output).map_err(|err| format!("invalid helper JSON: {err}; output: {output}"))
 }
 
 #[tauri::command]
 async fn expand_servers(
-    app: tauri::AppHandle,
     servers: String,
     bootstrap: String,
     timeout: String,
     domain: String,
     type_name: String,
     expected: String,
+    concurrency: String,
 ) -> Result<ExpandServersResponse, String> {
-    let _ = (domain, type_name, expected);
-    let output = tauri::async_runtime::spawn_blocking(move || {
-        run_helper(
-            &app,
-            vec![
-                "expand".to_string(),
-                "-servers".to_string(),
-                servers,
-                "-bootstrap".to_string(),
-                bootstrap,
-                "-timeout".to_string(),
-                timeout,
-            ],
-        )
+    let _ = (bootstrap, timeout, domain, type_name, expected, concurrency);
+    Ok(ExpandServersResponse {
+        servers,
+        changed: false,
+        error: None,
     })
-    .await
-    .map_err(|err| format!("DNS helper task failed: {err}"))??;
-    serde_json::from_str(&output).map_err(|err| format!("invalid helper JSON: {err}; output: {output}"))
 }
 
-fn run_helper(app: &tauri::AppHandle, args: Vec<String>) -> Result<String, String> {
-    let root = project_root()?;
-    let helper = helper_path(app, &root);
-    let output = if helper.exists() {
-        Command::new(helper).args(&args).current_dir(&root).output()
-    } else {
-        let mut go_args = vec!["run", "."];
-        go_args.extend(args.iter().map(String::as_str));
-        Command::new("go").args(go_args).current_dir(&root).output()
+async fn check_single_server(
+    server: ParsedServer,
+    domain: String,
+    type_name: String,
+    expected_values: Vec<String>,
+    record_type: RecordType,
+    timeout: Duration,
+) -> CheckResult {
+    let started = Instant::now();
+    match lookup_server(&server, &domain, record_type, timeout).await {
+        Ok(answers) => {
+            let matched = matches_expected(&answers, &expected_values);
+            let status = if matched { "ok" } else { "error" }.to_string();
+            let error = if matched {
+                None
+            } else {
+                Some(format!(
+                    "expected [{}], got [{}]",
+                    expected_values.join(", "),
+                    answers.join(", ")
+                ))
+            };
+            CheckResult {
+                line: server.line,
+                server: server.raw,
+                protocol: Some(server.protocol),
+                domain,
+                type_name,
+                duration_ms: started.elapsed().as_secs_f64() * 1000.0,
+                answers,
+                expected: expected_values,
+                matched: Some(matched),
+                status,
+                error,
+                response_code: None,
+            }
+        }
+        Err(error) => CheckResult {
+            matched: if expected_values.is_empty() {
+                None
+            } else {
+                Some(false)
+            },
+            line: server.line,
+            server: server.raw,
+            protocol: Some(server.protocol),
+            domain,
+            type_name,
+            duration_ms: started.elapsed().as_secs_f64() * 1000.0,
+            answers: Vec::new(),
+            expected: expected_values,
+            status: "error".to_string(),
+            error: Some(error),
+            response_code: None,
+        },
     }
-    .map_err(|err| format!("failed to run DNS helper: {err}"))?;
+}
 
-    if output.status.success() {
-        String::from_utf8(output.stdout).map_err(|err| format!("helper output is not UTF-8: {err}"))
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        Err(format!("DNS helper failed: {stderr}{stdout}"))
+async fn lookup_server(
+    server: &ParsedServer,
+    domain: &str,
+    record_type: RecordType,
+    timeout: Duration,
+) -> Result<Vec<String>, String> {
+    let name_servers = build_name_servers(server).await?;
+    let resolver = TokioResolver::builder_with_config(
+        ResolverConfig::from_parts(None, vec![], name_servers),
+        TokioConnectionProvider::default(),
+    )
+    .with_options(resolver_opts(timeout))
+    .build();
+
+    let lookup = tokio_timeout(timeout, resolver.lookup(domain, record_type))
+        .await
+        .map_err(|_| {
+            format!(
+                "lookup timed out after {}",
+                humantime::format_duration(timeout)
+            )
+        })?
+        .map_err(|err| err.to_string())?;
+
+    let mut answers = Vec::new();
+    for record in lookup.record_iter() {
+        answers.push(format_rdata(record.data()));
     }
+    answers.sort();
+    answers.dedup();
+    Ok(answers)
 }
 
-fn project_root() -> Result<PathBuf, String> {
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    manifest_dir
-        .parent()
-        .map(Path::to_path_buf)
-        .ok_or_else(|| "failed to locate project root".to_string())
-}
-
-fn helper_path(app: &tauri::AppHandle, root: &Path) -> PathBuf {
-    let exe = if cfg!(windows) {
-        "dnschecker-helper.exe"
+async fn build_name_servers(server: &ParsedServer) -> Result<NameServerConfigGroup, String> {
+    let socket_addrs = if let Ok(ip) = server.host.parse::<IpAddr>() {
+        vec![SocketAddr::new(ip, server.port)]
+    } else if !server.bootstrap.is_empty() {
+        server
+            .bootstrap
+            .iter()
+            .map(|ip| SocketAddr::new(*ip, server.port))
+            .collect()
     } else {
-        "dnschecker-helper"
+        tokio::net::lookup_host((server.host.as_str(), server.port))
+            .await
+            .map_err(|err| format!("failed to resolve {}: {err}", server.host))?
+            .collect()
     };
-    let dev_helper = root.join("bin").join(exe);
-    if dev_helper.exists() {
-        return dev_helper;
+
+    if socket_addrs.is_empty() {
+        return Err(format!("no address resolved for {}", server.host));
     }
-    if let Ok(resource_dir) = app.path().resource_dir() {
-        let bundled_helper = resource_dir.join(exe);
-        if bundled_helper.exists() {
-            return bundled_helper;
-        }
-        let nested_helper = resource_dir.join("bin").join(exe);
-        if nested_helper.exists() {
-            return nested_helper;
-        }
-        let tauri_resource_helper = resource_dir.join("_up_").join("bin").join(exe);
-        if tauri_resource_helper.exists() {
-            return tauri_resource_helper;
-        }
+
+    let mut group = NameServerConfigGroup::new();
+    for socket_addr in socket_addrs {
+        group.push(NameServerConfig {
+            socket_addr,
+            protocol: protocol_from_str(&server.protocol)?,
+            tls_dns_name: if matches!(server.protocol.as_str(), "tls" | "https")
+                && server.host.parse::<IpAddr>().is_err()
+            {
+                Some(server.host.clone())
+            } else {
+                None
+            },
+            http_endpoint: server.path.clone(),
+            trust_negative_responses: false,
+            bind_addr: None,
+        });
     }
-    dev_helper
+    Ok(group)
+}
+
+fn resolver_opts(timeout: Duration) -> ResolverOpts {
+    let mut options = ResolverOpts::default();
+    options.timeout = timeout;
+    options.attempts = 1;
+    options.num_concurrent_reqs = 1;
+    options
+}
+
+fn format_rdata(data: &RData) -> String {
+    match data {
+        RData::A(value) => value.to_string(),
+        RData::AAAA(value) => value.to_string(),
+        RData::CNAME(value) => value.to_utf8(),
+        RData::MX(value) => value.exchange().to_utf8(),
+        RData::NS(value) => value.to_utf8(),
+        RData::TXT(value) => value
+            .txt_data()
+            .iter()
+            .map(|bytes| String::from_utf8_lossy(bytes).to_string())
+            .collect::<Vec<_>>()
+            .join(" "),
+        _ => data.to_string(),
+    }
+}
+
+fn parse_servers(input: &str, global_bootstrap: &[IpAddr]) -> Result<Vec<ParsedServer>, String> {
+    let mut items = Vec::new();
+    for (index, line) in input.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        items.push(parse_server_line(
+            (index + 1) as u32,
+            trimmed,
+            global_bootstrap,
+        )?);
+    }
+    Ok(items)
+}
+
+fn parse_server_line(
+    line: u32,
+    input: &str,
+    global_bootstrap: &[IpAddr],
+) -> Result<ParsedServer, String> {
+    let mut parts = input.split_whitespace();
+    let endpoint = parts
+        .next()
+        .ok_or_else(|| format!("line {line}: empty server definition"))?;
+    let inline_bootstrap = parts
+        .map(parse_ip_addr)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|err| format!("line {line}: {err}"))?;
+    let bootstrap = if inline_bootstrap.is_empty() {
+        global_bootstrap.to_vec()
+    } else {
+        inline_bootstrap
+    };
+
+    let (protocol, host, port, path) = if let Some(rest) = endpoint.strip_prefix("udp://") {
+        parse_host_port("udp", rest, 53)?
+    } else if let Some(rest) = endpoint.strip_prefix("tcp://") {
+        parse_host_port("tcp", rest, 53)?
+    } else if let Some(rest) = endpoint.strip_prefix("dot://") {
+        parse_host_port("tls", rest, 853)?
+    } else if let Some(rest) = endpoint.strip_prefix("tls://") {
+        parse_host_port("tls", rest, 853)?
+    } else if let Some(rest) = endpoint.strip_prefix("https://") {
+        parse_https_endpoint("https", rest)?
+    } else if let Some(rest) = endpoint.strip_prefix("doh://") {
+        parse_https_endpoint("https", rest)?
+    } else {
+        parse_host_port("udp", endpoint, 53)?
+    };
+
+    Ok(ParsedServer {
+        line,
+        raw: input.to_string(),
+        protocol: protocol.to_string(),
+        host,
+        port,
+        path,
+        bootstrap,
+    })
+}
+
+fn parse_host_port(
+    protocol: &'static str,
+    value: &str,
+    default_port: u16,
+) -> Result<(&'static str, String, u16, Option<String>), String> {
+    if value.is_empty() {
+        return Err("missing host".to_string());
+    }
+    if let Ok(socket_addr) = value.parse::<SocketAddr>() {
+        return Ok((
+            protocol,
+            socket_addr.ip().to_string(),
+            socket_addr.port(),
+            None,
+        ));
+    }
+    if let Ok(ip) = value.parse::<IpAddr>() {
+        return Ok((protocol, ip.to_string(), default_port, None));
+    }
+
+    let bracketless = value.trim_matches(['[', ']']);
+    if let Some((host, port)) = split_host_port(bracketless) {
+        return Ok((protocol, host.to_string(), port, None));
+    }
+    Ok((protocol, bracketless.to_string(), default_port, None))
+}
+
+fn parse_https_endpoint(
+    protocol: &'static str,
+    value: &str,
+) -> Result<(&'static str, String, u16, Option<String>), String> {
+    let slash_index = value.find('/').unwrap_or(value.len());
+    let authority = &value[..slash_index];
+    let path = if slash_index < value.len() {
+        &value[slash_index..]
+    } else {
+        "/dns-query"
+    };
+    let (_, host, port, _) = parse_host_port(protocol, authority, 443)?;
+    Ok((protocol, host, port, Some(path.to_string())))
+}
+
+fn split_host_port(value: &str) -> Option<(&str, u16)> {
+    let (host, port) = value.rsplit_once(':')?;
+    let port = port.parse::<u16>().ok()?;
+    Some((host, port))
+}
+
+fn parse_ip_addr(value: &str) -> Result<IpAddr, String> {
+    IpAddr::from_str(value).map_err(|_| format!("invalid bootstrap IP: {value}"))
+}
+
+fn parse_bootstrap_list(input: &str) -> Result<Vec<IpAddr>, String> {
+    input
+        .split(|c: char| c == ',' || c.is_ascii_whitespace())
+        .filter(|item| !item.is_empty())
+        .map(parse_ip_addr)
+        .collect()
+}
+
+fn parse_expected(input: &str) -> Vec<String> {
+    input
+        .split(',')
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .map(ToString::to_string)
+        .collect()
+}
+
+fn matches_expected(answers: &[String], expected: &[String]) -> bool {
+    if expected.is_empty() {
+        return true;
+    }
+    expected.iter().all(|item| {
+        answers
+            .iter()
+            .any(|answer| answer.eq_ignore_ascii_case(item))
+    })
+}
+
+fn parse_timeout(input: &str) -> Result<Duration, String> {
+    humantime::parse_duration(input.trim())
+        .map_err(|err| format!("invalid timeout '{input}': {err}"))
+}
+
+fn parse_concurrency(input: &str) -> usize {
+    input
+        .trim()
+        .parse::<usize>()
+        .ok()
+        .filter(|value| *value > 0)
+        .unwrap_or(32)
+        .min(256)
+}
+
+fn parse_record_type(input: &str) -> Result<RecordType, String> {
+    RecordType::from_str(input.trim()).map_err(|_| format!("unsupported record type: {input}"))
+}
+
+fn protocol_from_str(input: &str) -> Result<Protocol, String> {
+    match input {
+        "udp" => Ok(Protocol::Udp),
+        "tcp" => Ok(Protocol::Tcp),
+        "tls" => Ok(Protocol::Tls),
+        "https" => Ok(Protocol::Https),
+        other => Err(format!("unsupported protocol: {other}")),
+    }
 }
 
 pub fn run() {

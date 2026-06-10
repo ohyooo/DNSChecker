@@ -112,14 +112,14 @@ function renderGlobalError(message: string) {
     const result = tr.querySelector<HTMLElement>(".result-cell");
     const time = tr.querySelector<HTMLElement>(".time-cell");
     if (time) {
-      time.textContent = "";
       time.className = "time-cell result-error";
-      time.textContent = message;
+      time.textContent = errorLabel(message);
+      bindErrorCopy(time, message);
     }
     if (result) {
-      result.textContent = "";
-      result.title = message;
       result.className = "result-cell result-error";
+      result.textContent = errorLabel(message);
+      bindErrorCopy(result, message);
     }
   });
 }
@@ -127,6 +127,51 @@ function renderGlobalError(message: string) {
 function errorLabel(error?: string) {
   const value = (error || "").toLowerCase();
   return value.includes("timeout") || value.includes("timed out") || value.includes("deadline") ? "timeout" : "error";
+}
+
+async function copyText(text: string) {
+  if (!text) return false;
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    const area = document.createElement("textarea");
+    area.value = text;
+    area.setAttribute("readonly", "true");
+    area.style.position = "fixed";
+    area.style.opacity = "0";
+    document.body.appendChild(area);
+    area.select();
+    const copied = document.execCommand("copy");
+    document.body.removeChild(area);
+    return copied;
+  }
+}
+
+function markCopied(cell: HTMLElement, copied: boolean) {
+  const label = cell.dataset.label || cell.textContent || "";
+  cell.textContent = copied ? "copied" : "copy failed";
+  window.setTimeout(() => {
+    cell.textContent = label;
+  }, 1200);
+}
+
+function bindErrorCopy(cell: HTMLElement | null, error?: string) {
+  if (!cell) return;
+  cell.classList.remove("copyable-cell");
+  cell.removeAttribute("title");
+  cell.onclick = null;
+  delete cell.dataset.label;
+  if (!error) return;
+
+  const label = errorLabel(error);
+  cell.dataset.label = label;
+  cell.classList.add("copyable-cell");
+  cell.title = `${error}\n\n点击复制`;
+  cell.onclick = async () => {
+    const copied = await copyText(error);
+    markCopied(cell, copied);
+  };
 }
 
 function renderResults(items: CheckResult[], total: number) {
@@ -145,10 +190,14 @@ function renderResults(items: CheckResult[], total: number) {
     row.title = item.error || answers;
     if (item.status === "ok") {
       row.textContent = answers;
+      bindErrorCopy(time);
+      bindErrorCopy(row);
       const serverCell = dnsRows.querySelector<HTMLElement>(`[data-line="${item.line}"] .server-cell`);
       successful.push(`${serverCell?.textContent?.trim() || item.server}    # line ${item.line}`);
     } else {
-      row.textContent = "";
+      row.textContent = errorLabel(item.error);
+      bindErrorCopy(time, item.error);
+      bindErrorCopy(row, item.error);
     }
   });
   successList.value = successful.join("\n");
@@ -166,6 +215,7 @@ function getFormValues() {
     expected: String(data.get("expected") || ""),
     bootstrap: String(data.get("bootstrap") || ""),
     timeout: String(data.get("timeout") || "5s"),
+    concurrency: String(data.get("concurrency") || "32"),
   };
 }
 
@@ -192,7 +242,7 @@ form.addEventListener("submit", async (event) => {
     renderResults(result.results, result.total);
   } catch (error) {
     checkButton.textContent = "检测";
-    renderGlobalError(errorLabel(String(error)));
+    renderGlobalError(String(error));
   } finally {
     checkButton.disabled = false;
   }

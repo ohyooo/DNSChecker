@@ -98,7 +98,7 @@ form {
 
 .settings {
   display: grid;
-  grid-template-columns: 1.1fr 150px 1.1fr 1.1fr 120px 112px;
+  grid-template-columns: 1.1fr 150px 1.1fr 1.1fr 120px 110px 112px;
   gap: 12px;
   align-items: end;
 }
@@ -150,6 +150,12 @@ button:disabled {
 
 .result-pending {
   color: #64748b;
+}
+
+.copyable-cell {
+  cursor: pointer;
+  text-decoration: underline dotted;
+  text-underline-offset: 2px;
 }
 
 .success-list {

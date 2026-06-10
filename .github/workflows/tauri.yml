@@ -114,6 +114,7 @@ jobs:
         run: npx tauri build --debug --no-bundle --target ${{ matrix.rust-target }}
 
       - name: Upload debug executable
+        if: matrix.os-name != 'macos'
         uses: actions/upload-artifact@v7
         with:
           name: dnschecker-${{ matrix.os-name }}-${{ matrix.arch }}-debug
@@ -124,6 +125,7 @@ jobs:
         run: npx tauri build --target ${{ matrix.rust-target }}
 
       - name: Upload release executable
+        if: matrix.os-name != 'macos'
         uses: actions/upload-artifact@v7
         with:
           name: dnschecker-${{ matrix.os-name }}-${{ matrix.arch }}-release
