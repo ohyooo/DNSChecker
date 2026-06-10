@@ -14,6 +14,7 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
+use tauri::{AppHandle, Emitter};
 use tokio::{sync::Semaphore, task::JoinSet, time::timeout as tokio_timeout};
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -52,6 +53,17 @@ struct ExpandServersResponse {
     error: Option<String>,
 }
 
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct CheckProgressEvent {
+    run_id: String,
+    result: CheckResult,
+    completed: u32,
+    total: u32,
+    ok: u32,
+    failed: u32,
+}
+
 #[derive(Debug, Clone)]
 struct ParsedServer {
     line: u32,
@@ -65,6 +77,7 @@ struct ParsedServer {
 
 #[tauri::command]
 async fn check_servers(
+    app: AppHandle,
     servers: String,
     domain: String,
     type_name: String,
@@ -72,6 +85,7 @@ async fn check_servers(
     bootstrap: String,
     timeout: String,
     concurrency: String,
+    run_id: String,
 ) -> Result<BatchCheckResponse, String> {
     let timeout = parse_timeout(&timeout)?;
     let concurrency = parse_concurrency(&concurrency);
@@ -110,12 +124,27 @@ async fn check_servers(
 
     let mut results = Vec::with_capacity(total as usize);
     let mut ok = 0u32;
+    let mut completed = 0u32;
 
     while let Some(joined) = tasks.join_next().await {
         let result = joined.map_err(|err| format!("DNS task join failed: {err}"))??;
+        completed += 1;
         if result.status == "ok" {
             ok += 1;
         }
+        let failed = completed.saturating_sub(ok);
+        app.emit(
+            "dns-check-progress",
+            CheckProgressEvent {
+                run_id: run_id.clone(),
+                result: result.clone(),
+                completed,
+                total,
+                ok,
+                failed,
+            },
+        )
+        .map_err(|err| format!("failed to emit progress event: {err}"))?;
         results.push(result);
     }
 

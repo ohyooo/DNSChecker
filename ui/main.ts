@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import defaultServers from "../dns_list.txt?raw";
 import "./style.css";
 
@@ -24,6 +25,15 @@ type ExpandServersResponse = {
   error?: string;
 };
 
+type CheckProgressEvent = {
+  runId: string;
+  result: CheckResult;
+  completed: number;
+  total: number;
+  ok: number;
+  failed: number;
+};
+
 const form = document.getElementById("form") as HTMLFormElement;
 const servers = document.getElementById("servers") as HTMLInputElement;
 const dnsRows = document.getElementById("dnsRows") as HTMLTableSectionElement;
@@ -33,6 +43,10 @@ const successList = document.getElementById("successList") as HTMLTextAreaElemen
 const successCount = document.getElementById("successCount") as HTMLSpanElement;
 
 servers.value = defaultServers;
+
+let activeRunId = "";
+let activeTotal = 0;
+const successfulServers = new Map<number, string>();
 
 function serverLines() {
   return servers.value.split("\n");
@@ -102,6 +116,14 @@ function renderPending(text: string) {
   if (activeLine > 0) {
     dnsRows.querySelector<HTMLElement>(`[data-line="${activeLine}"] .server-cell`)?.focus();
   }
+}
+
+function resetRunState(total = 0) {
+  activeTotal = total;
+  successfulServers.clear();
+  successListWrap.style.display = "none";
+  successList.value = "";
+  successCount.textContent = total ? `0/${total}` : "";
 }
 
 function renderGlobalError(message: string) {
@@ -176,33 +198,49 @@ function bindErrorCopy(cell: HTMLElement | null, error?: string) {
 
 function renderResults(items: CheckResult[], total: number) {
   renderPending("");
-  const successful: string[] = [];
+  resetRunState(total);
   items.forEach((item) => {
-    const row = dnsRows.querySelector<HTMLElement>(`[data-line="${item.line}"] .result-cell`);
-    const time = dnsRows.querySelector<HTMLElement>(`[data-line="${item.line}"] .time-cell`);
-    if (!row) return;
-    const answers = item.answers?.length ? item.answers.join(", ") : "<empty>";
-    row.className = `result-cell ${item.status === "ok" ? "result-ok" : "result-error"}`;
-    if (time) {
-      time.className = `time-cell ${item.status === "ok" ? "result-ok" : "result-error"}`;
-      time.textContent = item.status === "ok" ? `${(item.duration_ms || 0).toFixed(2)}` : errorLabel(item.error);
-    }
-    row.title = item.error || answers;
-    if (item.status === "ok") {
-      row.textContent = answers;
-      bindErrorCopy(time);
-      bindErrorCopy(row);
-      const serverCell = dnsRows.querySelector<HTMLElement>(`[data-line="${item.line}"] .server-cell`);
-      successful.push(`${serverCell?.textContent?.trim() || item.server}    # line ${item.line}`);
-    } else {
-      row.textContent = errorLabel(item.error);
-      bindErrorCopy(time, item.error);
-      bindErrorCopy(row, item.error);
-    }
+    applyProgress(item);
   });
-  successList.value = successful.join("\n");
-  successCount.textContent = `${successful.length}/${total}`;
-  successListWrap.style.display = successful.length ? "grid" : "none";
+  successCount.textContent = `${successfulServers.size}/${total}`;
+}
+
+function updateSuccessList() {
+  const lines = Array.from(successfulServers.entries())
+    .sort((a, b) => a[0] - b[0])
+    .map(([, value]) => value);
+  successList.value = lines.join("\n");
+  successCount.textContent = `${successfulServers.size}/${activeTotal}`;
+  successListWrap.style.display = lines.length ? "grid" : "none";
+}
+
+function applyProgress(item: CheckResult) {
+  const row = dnsRows.querySelector<HTMLElement>(`[data-line="${item.line}"] .result-cell`);
+  const time = dnsRows.querySelector<HTMLElement>(`[data-line="${item.line}"] .time-cell`);
+  if (!row) return;
+
+  const answers = item.answers?.length ? item.answers.join(", ") : "<empty>";
+  row.className = `result-cell ${item.status === "ok" ? "result-ok" : "result-error"}`;
+  if (time) {
+    time.className = `time-cell ${item.status === "ok" ? "result-ok" : "result-error"}`;
+    time.textContent = item.status === "ok" ? `${(item.duration_ms || 0).toFixed(2)}` : errorLabel(item.error);
+  }
+  row.title = item.error || answers;
+
+  if (item.status === "ok") {
+    row.textContent = answers;
+    bindErrorCopy(time);
+    bindErrorCopy(row);
+    const serverCell = dnsRows.querySelector<HTMLElement>(`[data-line="${item.line}"] .server-cell`);
+    successfulServers.set(item.line, `${serverCell?.textContent?.trim() || item.server}    # line ${item.line}`);
+  } else {
+    row.textContent = errorLabel(item.error);
+    bindErrorCopy(time, item.error);
+    bindErrorCopy(row, item.error);
+    successfulServers.delete(item.line);
+  }
+
+  updateSuccessList();
 }
 
 function getFormValues() {
@@ -216,19 +254,27 @@ function getFormValues() {
     bootstrap: String(data.get("bootstrap") || ""),
     timeout: String(data.get("timeout") || "5s"),
     concurrency: String(data.get("concurrency") || "32"),
+    runId: activeRunId,
   };
 }
 
 renderPending("");
 
+listen<CheckProgressEvent>("dns-check-progress", (event) => {
+  if (event.payload.runId !== activeRunId) return;
+  applyProgress(event.payload.result);
+});
+
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
+  activeRunId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const values = getFormValues();
+  const total = values.servers
+    .split("\n")
+    .filter((line) => isCheckableLine(line)).length;
   checkButton.disabled = true;
   checkButton.textContent = "检测中...";
-  successListWrap.style.display = "none";
-  successList.value = "";
-  successCount.textContent = "";
+  resetRunState(total);
   try {
     const expanded = await invoke<ExpandServersResponse>("expand_servers", values);
     if (expanded.servers && expanded.servers !== servers.value) {
