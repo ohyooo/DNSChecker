@@ -1,5 +1,4 @@
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
 import defaultServers from "../dns_list.txt?raw";
 import "./style.css";
 
@@ -25,13 +24,14 @@ type ExpandServersResponse = {
   error?: string;
 };
 
-type CheckProgressEvent = {
-  runId: string;
-  result: CheckResult;
-  completed: number;
-  total: number;
-  ok: number;
-  failed: number;
+type SingleCheckRequest = {
+  line: number;
+  server: string;
+  domain: string;
+  typeName: string;
+  expected: string;
+  bootstrap: string;
+  timeout: string;
 };
 
 const form = document.getElementById("form") as HTMLFormElement;
@@ -44,9 +44,9 @@ const successCount = document.getElementById("successCount") as HTMLSpanElement;
 
 servers.value = defaultServers;
 
-let activeRunId = "";
 let activeTotal = 0;
 const successfulServers = new Map<number, string>();
+const completedLines = new Set<number>();
 
 function serverLines() {
   return servers.value.split("\n");
@@ -118,9 +118,29 @@ function renderPending(text: string) {
   }
 }
 
+function setPendingState(text: string) {
+  dnsRows.querySelectorAll("tr").forEach((tr) => {
+    const lineNumber = Number(tr.getAttribute("data-line") || 0);
+    const line = serverLines()[lineNumber - 1] || "";
+    const time = tr.querySelector<HTMLElement>(".time-cell");
+    const result = tr.querySelector<HTMLElement>(".result-cell");
+
+    if (!time || !result) return;
+
+    time.className = "time-cell result-pending";
+    result.className = "result-cell result-pending";
+    time.textContent = isCheckableLine(line) ? text : "";
+    result.textContent = "";
+    bindErrorCopy(time);
+    bindErrorCopy(result);
+    result.removeAttribute("title");
+  });
+}
+
 function resetRunState(total = 0) {
   activeTotal = total;
   successfulServers.clear();
+  completedLines.clear();
   successListWrap.style.display = "none";
   successList.value = "";
   successCount.textContent = total ? `0/${total}` : "";
@@ -196,10 +216,10 @@ function bindErrorCopy(cell: HTMLElement | null, error?: string) {
   };
 }
 
-function renderResults(items: CheckResult[], total: number) {
-  renderPending("");
-  resetRunState(total);
+function reconcileResults(items: CheckResult[], total: number) {
+  activeTotal = total;
   items.forEach((item) => {
+    if (completedLines.has(item.line)) return;
     applyProgress(item);
   });
   successCount.textContent = `${successfulServers.size}/${total}`;
@@ -218,6 +238,7 @@ function applyProgress(item: CheckResult) {
   const row = dnsRows.querySelector<HTMLElement>(`[data-line="${item.line}"] .result-cell`);
   const time = dnsRows.querySelector<HTMLElement>(`[data-line="${item.line}"] .time-cell`);
   if (!row) return;
+  completedLines.add(item.line);
 
   const answers = item.answers?.length ? item.answers.join(", ") : "<empty>";
   row.className = `result-cell ${item.status === "ok" ? "result-ok" : "result-error"}`;
@@ -254,20 +275,46 @@ function getFormValues() {
     bootstrap: String(data.get("bootstrap") || ""),
     timeout: String(data.get("timeout") || "5s"),
     concurrency: String(data.get("concurrency") || "32"),
-    runId: activeRunId,
   };
+}
+
+async function runChecksIncrementally(values: ReturnType<typeof getFormValues>) {
+  const concurrency = Math.max(1, Math.min(256, Number.parseInt(values.concurrency, 10) || 32));
+  const queue = values.servers
+    .split("\n")
+    .map((server, index) => ({ server, line: index + 1 }))
+    .filter(({ server }) => isCheckableLine(server));
+
+  let nextIndex = 0;
+
+  async function worker() {
+    while (nextIndex < queue.length) {
+      const currentIndex = nextIndex;
+      nextIndex += 1;
+      const item = queue[currentIndex];
+      const result = await invoke<CheckResult>("check_server", {
+        request: {
+          line: item.line,
+          server: item.server,
+          domain: values.domain,
+          typeName: values.typeName,
+          expected: values.expected,
+          bootstrap: values.bootstrap,
+          timeout: values.timeout,
+        } satisfies SingleCheckRequest,
+      });
+      applyProgress(result);
+    }
+  }
+
+  await Promise.all(Array.from({ length: Math.min(concurrency, queue.length) }, () => worker()));
+  return queue.length;
 }
 
 renderPending("");
 
-listen<CheckProgressEvent>("dns-check-progress", (event) => {
-  if (event.payload.runId !== activeRunId) return;
-  applyProgress(event.payload.result);
-});
-
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
-  activeRunId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const values = getFormValues();
   const total = values.servers
     .split("\n")
@@ -279,13 +326,15 @@ form.addEventListener("submit", async (event) => {
     const expanded = await invoke<ExpandServersResponse>("expand_servers", values);
     if (expanded.servers && expanded.servers !== servers.value) {
       servers.value = expanded.servers;
+      renderPending("");
     }
   } catch {}
   try {
-    renderPending("检测中...");
-    const result = await invoke<BatchCheckResponse>("check_servers", getFormValues());
+    setPendingState("检测中...");
+    const finalValues = getFormValues();
+    const checkedTotal = await runChecksIncrementally(finalValues);
     checkButton.textContent = "检测";
-    renderResults(result.results, result.total);
+    successCount.textContent = `${successfulServers.size}/${checkedTotal}`;
   } catch (error) {
     checkButton.textContent = "检测";
     renderGlobalError(String(error));

@@ -14,7 +14,6 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
-use tauri::{AppHandle, Emitter};
 use tokio::{sync::Semaphore, task::JoinSet, time::timeout as tokio_timeout};
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -53,15 +52,16 @@ struct ExpandServersResponse {
     error: Option<String>,
 }
 
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct CheckProgressEvent {
-    run_id: String,
-    result: CheckResult,
-    completed: u32,
-    total: u32,
-    ok: u32,
-    failed: u32,
+struct SingleCheckRequest {
+    line: u32,
+    server: String,
+    domain: String,
+    type_name: String,
+    expected: String,
+    bootstrap: String,
+    timeout: String,
 }
 
 #[derive(Debug, Clone)]
@@ -77,7 +77,6 @@ struct ParsedServer {
 
 #[tauri::command]
 async fn check_servers(
-    app: AppHandle,
     servers: String,
     domain: String,
     type_name: String,
@@ -85,7 +84,6 @@ async fn check_servers(
     bootstrap: String,
     timeout: String,
     concurrency: String,
-    run_id: String,
 ) -> Result<BatchCheckResponse, String> {
     let timeout = parse_timeout(&timeout)?;
     let concurrency = parse_concurrency(&concurrency);
@@ -124,27 +122,12 @@ async fn check_servers(
 
     let mut results = Vec::with_capacity(total as usize);
     let mut ok = 0u32;
-    let mut completed = 0u32;
 
     while let Some(joined) = tasks.join_next().await {
         let result = joined.map_err(|err| format!("DNS task join failed: {err}"))??;
-        completed += 1;
         if result.status == "ok" {
             ok += 1;
         }
-        let failed = completed.saturating_sub(ok);
-        app.emit(
-            "dns-check-progress",
-            CheckProgressEvent {
-                run_id: run_id.clone(),
-                result: result.clone(),
-                completed,
-                total,
-                ok,
-                failed,
-            },
-        )
-        .map_err(|err| format!("failed to emit progress event: {err}"))?;
         results.push(result);
     }
 
@@ -173,6 +156,27 @@ async fn expand_servers(
         changed: false,
         error: None,
     })
+}
+
+#[tauri::command]
+async fn check_server(request: SingleCheckRequest) -> Result<CheckResult, String> {
+    let timeout = parse_timeout(&request.timeout)?;
+    let global_bootstrap = parse_bootstrap_list(&request.bootstrap)?;
+    let expected_values = parse_expected(&request.expected);
+    let record_type = parse_record_type(&request.type_name)?;
+    let server = parse_server_line(request.line, request.server.trim(), &global_bootstrap)?;
+
+    Ok(
+        check_single_server(
+            server,
+            request.domain,
+            request.type_name,
+            expected_values,
+            record_type,
+            timeout,
+        )
+        .await,
+    )
 }
 
 async fn check_single_server(
@@ -505,7 +509,11 @@ fn protocol_from_str(input: &str) -> Result<Protocol, String> {
 
 pub fn run() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![check_servers, expand_servers])
+        .invoke_handler(tauri::generate_handler![
+            check_server,
+            check_servers,
+            expand_servers
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
