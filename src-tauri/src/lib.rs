@@ -258,7 +258,7 @@ async fn lookup_server(
         .map_err(|err| err.to_string())?;
 
     let mut answers = Vec::new();
-    for record in lookup.record_iter() {
+    for record in lookup.answers() {
         answers.push(format_rdata(record.data()));
     }
     answers.sort();
