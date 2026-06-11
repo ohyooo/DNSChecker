@@ -4,6 +4,10 @@ DNSChecker is a Tauri desktop app for checking DNS latency and query results in 
 
 The UI loads the default DNS server list from `dns_list.txt`, lets each row be edited inline, and displays latency, answers, timeout/error status, and a filtered successful DNS list.
 
+## Screenshot
+
+![DNSChecker desktop app screenshot](docs/screenshot.png)
+
 ## Features
 
 - Batch check DNS servers from `dns_list.txt`
