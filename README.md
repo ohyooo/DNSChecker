@@ -1,69 +1,71 @@
 # DNSChecker
 
-DNSChecker is a Tauri desktop app for checking DNS latency and query results in batches.
+DNSChecker 是一个基于 Tauri 的桌面应用，用于批量检测 DNS 延迟和查询结果。
 
-The UI loads the default DNS server list from `dns_list.txt`, lets each row be edited inline, and displays latency, answers, timeout/error status, and a filtered successful DNS list.
+应用启动后会从 `dns_list.txt` 读取默认 DNS 列表，支持直接在表格中逐行编辑，并展示耗时、应答内容、超时/错误状态，以及筛选后的成功 DNS 列表。
 
-## Screenshot
+## 截图
 
-![DNSChecker desktop app screenshot](docs/screenshot.png)
+![DNSChecker 桌面应用截图](docs/screenshot.png)
 
-## Features
+## 功能特性
 
-- Batch check DNS servers from `dns_list.txt`
-- Inline editable DNS server table
-- Shared domain, record type, expected answer, bootstrap DNS, and timeout settings
-- Configurable concurrency limit, default `32`
-- Result table with `耗时(ms)` and DNS answers
-- Timeout and other failures shown as `timeout` / `error`, click to copy full error details
-- Successful DNS list with `success/total` count
-- Tauri desktop packaging for Windows, Linux, and macOS
+- 从 `dns_list.txt` 批量检测 DNS 服务器
+- 支持在表格中直接编辑 DNS 条目
+- 统一设置检测域名、记录类型、预期结果、Bootstrap DNS 和超时时间
+- 支持配置并发数，默认值为 `32`
+- 结果表展示 `耗时(ms)` 和 DNS 应答内容
+- 超时或其他失败会显示为 `timeout` / `error`，点击可复制完整错误信息
+- 显示成功 DNS 列表以及 `success/total` 统计
+- 支持通过 Tauri 打包 Windows、Linux 和 macOS 桌面应用
 
-## Requirements
+## 环境要求
 
 - Node.js 24+
 - npm 11+
-- Rust stable toolchain
-- Platform build dependencies for Tauri
+- Rust stable 工具链
+- Tauri 所需的平台构建依赖
 
-Linux additionally needs WebKitGTK and packaging dependencies. The GitHub Actions workflow installs:
+Linux 额外需要 WebKitGTK 和打包依赖。GitHub Actions 工作流中安装的是：
 
 ```bash
 sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf rpm
 ```
 
-## Project Structure
+## 项目结构
 
 ```text
 DNSChecker/
 ├─ .github/
 │  ├─ workflows/
-│  │  └─ tauri.yml          # CI: debug/release Tauri builds and artifacts
-│  └─ dependabot.yml        # Dependency update configuration
-├─ dns_list.txt             # Default DNS server list loaded by the frontend
-├─ index.html               # Vite HTML entry
-├─ package.json             # npm scripts and frontend/Tauri CLI dependencies
+│  │  └─ tauri.yml          # CI：构建 debug/release Tauri 产物并上传
+│  └─ dependabot.yml        # 依赖更新配置
+├─ dns_list.txt             # 前端加载的默认 DNS 列表
+├─ index.html               # Vite HTML 入口
+├─ package.json             # npm 脚本及前端/Tauri CLI 依赖
 ├─ package-lock.json
+├─ docs/
+│  └─ screenshot.png        # 应用界面截图
 ├─ ui/
-│  ├─ main.ts               # Frontend state, Tauri invoke calls, result rendering
-│  └─ style.css             # App layout and table styling
+│  ├─ main.ts               # 前端状态、Tauri invoke 调用、结果渲染
+│  └─ style.css             # 应用布局和表格样式
 └─ src-tauri/
-   ├─ Cargo.toml            # Rust/Tauri dependencies
+   ├─ Cargo.toml            # Rust/Tauri 依赖
    ├─ Cargo.lock
    ├─ build.rs
-   ├─ tauri.conf.json       # Tauri app/build/bundle configuration
+   ├─ tauri.conf.json       # Tauri 应用/构建/打包配置
    ├─ icons/
    │  └─ icon.ico
    └─ src/
-      ├─ main.rs            # Tauri binary entry; hides Windows console window
-      └─ lib.rs             # Tauri commands exposed to the frontend
+      ├─ main.rs            # Tauri 二进制入口；隐藏 Windows 控制台窗口
+      └─ lib.rs             # 暴露给前端的 Tauri 命令
 ```
 
-Generated folders such as `node_modules/`, `dist/`, and `src-tauri/target/` are ignored.
+`node_modules/`、`dist/` 和 `src-tauri/target/` 等生成目录默认会被忽略。
 
-## DNS List Format
+## DNS 列表格式
 
-`dns_list.txt` accepts one DNS server per line.
+`dns_list.txt` 每行接受一个 DNS 服务器配置。
 
 ```text
 8.8.8.8
@@ -72,9 +74,9 @@ dot://dns.google 8.8.8.8
 https://dns.google/dns-query 8.8.8.8
 ```
 
-The optional second column pins the server IP used for a domain-based DNS endpoint.
+第二列是可选项，用于为基于域名的 DNS 端点固定解析 IP。
 
-Supported endpoint forms depend on the native command implementation, but the UI is designed for:
+支持的端点形式取决于原生命令实现，但当前 UI 设计面向以下格式：
 
 - `udp://host[:port]`
 - `tcp://host[:port]`
@@ -82,39 +84,39 @@ Supported endpoint forms depend on the native command implementation, but the UI
 - `tls://host[:port]`
 - `https://host/path`
 - `doh://host/path`
-- bare IP/host, treated as UDP by default
+- 裸 IP/host，默认按 UDP 处理
 
-## Development
+## 开发
 
-Install dependencies:
+安装依赖：
 
 ```bash
 npm install
 ```
 
-Start the Tauri development app:
+启动 Tauri 开发环境：
 
 ```bash
 npm run dev
 ```
 
-This starts Vite at `http://127.0.0.1:5173` and then launches the Tauri desktop window.
+该命令会先启动 Vite：`http://127.0.0.1:5173`，随后拉起 Tauri 桌面窗口。
 
-## Build
+## 构建
 
-Build the frontend only:
+仅构建前端：
 
 ```bash
 npm run build:frontend
 ```
 
-Build the desktop app and installers for the current platform:
+构建当前平台的桌面应用和安装包：
 
 ```bash
 npm run build
 ```
 
-On Windows, typical outputs are:
+在 Windows 上，典型输出如下：
 
 ```text
 src-tauri/target/release/dnschecker.exe
@@ -122,72 +124,72 @@ src-tauri/target/release/bundle/msi/*.msi
 src-tauri/target/release/bundle/nsis/*.exe
 ```
 
-## Useful Commands
+## 常用命令
 
 ```bash
-npm run dev             # Start Vite + Tauri dev app
-npm run build:frontend  # Build dist/ frontend assets
-npm run build           # Build Tauri release package
+npm run dev             # 启动 Vite + Tauri 开发环境
+npm run build:frontend  # 构建 dist/ 前端资源
+npm run build           # 构建 Tauri release 包
 cd src-tauri && cargo check
 ```
 
-## Runtime Flow
+## 运行流程
 
 ```mermaid
 flowchart TD
-  A[App starts] --> B[Vite serves frontend in dev<br/>or Tauri loads dist in release]
-  B --> C[ui/main.ts imports dns_list.txt]
-  C --> D[Render editable DNS table]
-  D --> E[User clicks 检测]
+  A[应用启动] --> B[开发环境由 Vite 提供前端<br/>发布环境由 Tauri 加载 dist]
+  B --> C[ui/main.ts 读取 dns_list.txt]
+  C --> D[渲染可编辑 DNS 表格]
+  D --> E[用户点击 检测]
   E --> F[invoke expand_servers]
-  F --> G[Optional DNS endpoint expansion]
+  F --> G[可选：展开 DNS 端点]
   G --> H[invoke check_servers]
-  H --> I[Native Tauri command runs async]
-  I --> J[Return batch results as JSON]
-  J --> K[Render latency, timeout/error, answers]
-  K --> L[Render 成功 DNS count and list]
+  H --> I[原生 Tauri 异步命令执行检测]
+  I --> J[以 JSON 返回批量结果]
+  J --> K[渲染耗时、超时/错误、应答内容]
+  K --> L[渲染成功 DNS 数量和列表]
 ```
 
-## Build Flow
+## 构建流程
 
 ```mermaid
 flowchart LR
   A[npm run build] --> B[Tauri beforeBuildCommand]
   B --> C[npm run build:frontend]
-  C --> D[Vite writes dist/]
-  D --> E[Cargo builds src-tauri]
-  E --> F[Tauri bundles app]
-  F --> G[Platform artifacts]
+  C --> D[Vite 输出 dist/]
+  D --> E[Cargo 构建 src-tauri]
+  E --> F[Tauri 打包应用]
+  F --> G[平台产物]
 ```
 
 ## CI
 
-GitHub Actions workflow: `.github/workflows/tauri.yml`.
+GitHub Actions 工作流位于 `.github/workflows/tauri.yml`。
 
-The workflow builds debug and release artifacts for:
+当前工作流会为以下平台构建 debug 和 release 产物：
 
-- Windows: `x86`, `x64`, `arm`
-- Linux: `x86`, `x64`, `arm`
-- macOS: `arm`
+- Windows：`x86`、`x64`、`arm`
+- Linux：`x86`、`x64`、`arm`
+- macOS：`arm`
 
-Uploaded artifacts include:
+上传的产物包括：
 
-- Debug executable (Windows/Linux)
-- Release executable (Windows/Linux)
-- Release bundles/installers when generated by Tauri
+- Debug 可执行文件（Windows/Linux）
+- Release 可执行文件（Windows/Linux）
+- Tauri 生成的 Release 安装包或 bundle
 
-For macOS, download the bundled `.app` / `.dmg` artifact. The standalone Unix executable is not uploaded because double-clicking it from Finder opens Terminal instead of the app bundle.
+对于 macOS，请下载打包后的 `.app` / `.dmg` 产物。未单独上传裸 Unix 可执行文件，因为从 Finder 双击时会打开 Terminal，而不是以应用包形式启动。
 
 ## Dependabot
 
-Dependabot is configured in `.github/dependabot.yml` for:
+`.github/dependabot.yml` 当前配置了以下更新源：
 
-- npm dependencies in `/`
-- Cargo dependencies in `/src-tauri`
-- GitHub Actions dependencies in `/`
+- `/` 下的 npm 依赖
+- `/src-tauri` 下的 Cargo 依赖
+- `/` 下的 GitHub Actions 依赖
 
-## Notes
+## 说明
 
-- The Windows binary uses `windows_subsystem = "windows"` in `src-tauri/src/main.rs`, so double-clicking the app does not open a console window.
-- `npm run dev` is still launched from a terminal during development; that terminal belongs to the dev process, not the packaged desktop app.
-- The default concurrency is `32`. For most desktop use, keep it in the `16-64` range unless you have a clear reason to push higher.
+- Windows 二进制在 `src-tauri/src/main.rs` 中使用了 `windows_subsystem = "windows"`，因此双击运行不会弹出控制台窗口。
+- 开发时执行 `npm run dev` 仍然需要终端，这个终端属于开发进程，不属于打包后的桌面应用。
+- 默认并发数为 `32`。一般桌面环境建议维持在 `16-64` 区间，除非你明确知道需要更高并发。
