@@ -1,10 +1,7 @@
 use hickory_resolver::{
-    config::{NameServerConfig, NameServerConfigGroup, ResolverConfig, ResolverOpts},
-    name_server::TokioConnectionProvider,
-    proto::{
-        rr::{RData, RecordType},
-        xfer::Protocol,
-    },
+    config::{ConnectionConfig, NameServerConfig, ProtocolConfig, ResolverConfig, ResolverOpts},
+    net::runtime::TokioRuntimeProvider,
+    proto::rr::{RData, RecordType},
     TokioResolver,
 };
 use serde::{Deserialize, Serialize};
@@ -166,17 +163,15 @@ async fn check_server(request: SingleCheckRequest) -> Result<CheckResult, String
     let record_type = parse_record_type(&request.type_name)?;
     let server = parse_server_line(request.line, request.server.trim(), &global_bootstrap)?;
 
-    Ok(
-        check_single_server(
-            server,
-            request.domain,
-            request.type_name,
-            expected_values,
-            record_type,
-            timeout,
-        )
-        .await,
+    Ok(check_single_server(
+        server,
+        request.domain,
+        request.type_name,
+        expected_values,
+        record_type,
+        timeout,
     )
+    .await)
 }
 
 async fn check_single_server(
@@ -246,10 +241,11 @@ async fn lookup_server(
     let name_servers = build_name_servers(server).await?;
     let resolver = TokioResolver::builder_with_config(
         ResolverConfig::from_parts(None, vec![], name_servers),
-        TokioConnectionProvider::default(),
+        TokioRuntimeProvider::default(),
     )
     .with_options(resolver_opts(timeout))
-    .build();
+    .build()
+    .map_err(|err| err.to_string())?;
 
     let lookup = tokio_timeout(timeout, resolver.lookup(domain, record_type))
         .await
@@ -270,7 +266,7 @@ async fn lookup_server(
     Ok(answers)
 }
 
-async fn build_name_servers(server: &ParsedServer) -> Result<NameServerConfigGroup, String> {
+async fn build_name_servers(server: &ParsedServer) -> Result<Vec<NameServerConfig>, String> {
     let socket_addrs = if let Ok(ip) = server.host.parse::<IpAddr>() {
         vec![SocketAddr::new(ip, server.port)]
     } else if !server.bootstrap.is_empty() {
@@ -290,22 +286,13 @@ async fn build_name_servers(server: &ParsedServer) -> Result<NameServerConfigGro
         return Err(format!("no address resolved for {}", server.host));
     }
 
-    let mut group = NameServerConfigGroup::new();
+    let mut group = Vec::with_capacity(socket_addrs.len());
     for socket_addr in socket_addrs {
-        group.push(NameServerConfig {
-            socket_addr,
-            protocol: protocol_from_str(&server.protocol)?,
-            tls_dns_name: if matches!(server.protocol.as_str(), "tls" | "https")
-                && server.host.parse::<IpAddr>().is_err()
-            {
-                Some(server.host.clone())
-            } else {
-                None
-            },
-            http_endpoint: server.path.clone(),
-            trust_negative_responses: false,
-            bind_addr: None,
-        });
+        group.push(NameServerConfig::new(
+            socket_addr.ip(),
+            false,
+            vec![connection_config(server, socket_addr.port())?],
+        ));
     }
     Ok(group)
 }
@@ -323,10 +310,10 @@ fn format_rdata(data: &RData) -> String {
         RData::A(value) => value.to_string(),
         RData::AAAA(value) => value.to_string(),
         RData::CNAME(value) => value.to_utf8(),
-        RData::MX(value) => value.exchange().to_utf8(),
+        RData::MX(value) => value.exchange.to_utf8(),
         RData::NS(value) => value.to_utf8(),
         RData::TXT(value) => value
-            .txt_data()
+            .txt_data
             .iter()
             .map(|bytes| String::from_utf8_lossy(bytes).to_string())
             .collect::<Vec<_>>()
@@ -497,12 +484,24 @@ fn parse_record_type(input: &str) -> Result<RecordType, String> {
     RecordType::from_str(input.trim()).map_err(|_| format!("unsupported record type: {input}"))
 }
 
-fn protocol_from_str(input: &str) -> Result<Protocol, String> {
-    match input {
-        "udp" => Ok(Protocol::Udp),
-        "tcp" => Ok(Protocol::Tcp),
-        "tls" => Ok(Protocol::Tls),
-        "https" => Ok(Protocol::Https),
+fn connection_config(server: &ParsedServer, port: u16) -> Result<ConnectionConfig, String> {
+    let protocol = protocol_config(server)?;
+    let mut config = ConnectionConfig::new(protocol);
+    config.port = port;
+    Ok(config)
+}
+
+fn protocol_config(server: &ParsedServer) -> Result<ProtocolConfig, String> {
+    match server.protocol.as_str() {
+        "udp" => Ok(ProtocolConfig::Udp),
+        "tcp" => Ok(ProtocolConfig::Tcp),
+        "tls" => Ok(ProtocolConfig::Tls {
+            server_name: Arc::from(server.host.as_str()),
+        }),
+        "https" => Ok(ProtocolConfig::Https {
+            server_name: Arc::from(server.host.as_str()),
+            path: Arc::from(server.path.as_deref().unwrap_or("/dns-query")),
+        }),
         other => Err(format!("unsupported protocol: {other}")),
     }
 }
