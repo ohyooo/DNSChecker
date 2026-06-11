@@ -259,7 +259,7 @@ async fn lookup_server(
 
     let mut answers = Vec::new();
     for record in lookup.answers() {
-        answers.push(format_rdata(record.data()));
+        answers.push(format_rdata(&record.data));
     }
     answers.sort();
     answers.dedup();
