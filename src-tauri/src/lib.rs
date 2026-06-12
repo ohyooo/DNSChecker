@@ -238,9 +238,40 @@ async fn lookup_server(
     record_type: RecordType,
     timeout: Duration,
 ) -> Result<Vec<String>, String> {
-    let name_servers = build_name_servers(server).await?;
+    let socket_addrs = resolve_socket_addrs(server).await?;
+    let mut errors = Vec::new();
+
+    for socket_addr in socket_addrs {
+        match lookup_socket_addr(server, socket_addr, domain, record_type, timeout).await {
+            Ok(answers) => return Ok(answers),
+            Err(error) => errors.push(format!("{socket_addr}: {error}")),
+        }
+    }
+
+    Err(format!(
+        "all upstream addresses failed for {}: {}",
+        server.host,
+        errors.join("; ")
+    ))
+}
+
+async fn lookup_socket_addr(
+    server: &ParsedServer,
+    socket_addr: SocketAddr,
+    domain: &str,
+    record_type: RecordType,
+    timeout: Duration,
+) -> Result<Vec<String>, String> {
     let resolver = TokioResolver::builder_with_config(
-        ResolverConfig::from_parts(None, vec![], name_servers),
+        ResolverConfig::from_parts(
+            None,
+            vec![],
+            vec![name_server_config(
+                server,
+                socket_addr.port(),
+                socket_addr.ip(),
+            )?],
+        ),
         TokioRuntimeProvider::default(),
     )
     .with_options(resolver_opts(timeout))
@@ -266,7 +297,7 @@ async fn lookup_server(
     Ok(answers)
 }
 
-async fn build_name_servers(server: &ParsedServer) -> Result<Vec<NameServerConfig>, String> {
+async fn resolve_socket_addrs(server: &ParsedServer) -> Result<Vec<SocketAddr>, String> {
     let socket_addrs = if let Ok(ip) = server.host.parse::<IpAddr>() {
         vec![SocketAddr::new(ip, server.port)]
     } else if !server.bootstrap.is_empty() {
@@ -286,15 +317,19 @@ async fn build_name_servers(server: &ParsedServer) -> Result<Vec<NameServerConfi
         return Err(format!("no address resolved for {}", server.host));
     }
 
-    let mut group = Vec::with_capacity(socket_addrs.len());
-    for socket_addr in socket_addrs {
-        group.push(NameServerConfig::new(
-            socket_addr.ip(),
-            false,
-            vec![connection_config(server, socket_addr.port())?],
-        ));
-    }
-    Ok(group)
+    Ok(socket_addrs)
+}
+
+fn name_server_config(
+    server: &ParsedServer,
+    port: u16,
+    ip: IpAddr,
+) -> Result<NameServerConfig, String> {
+    Ok(NameServerConfig::new(
+        ip,
+        false,
+        vec![connection_config(server, port)?],
+    ))
 }
 
 fn resolver_opts(timeout: Duration) -> ResolverOpts {
