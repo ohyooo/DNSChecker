@@ -1,9 +1,16 @@
+use hickory_proto::{
+    op::{Message, MessageType, OpCode, Query, ResponseCode},
+    rr::domain::Name,
+    serialize::binary::{BinDecodable, BinEncodable},
+};
 use hickory_resolver::{
     config::{ConnectionConfig, NameServerConfig, ProtocolConfig, ResolverConfig, ResolverOpts},
     net::runtime::TokioRuntimeProvider,
     proto::rr::{RData, RecordType},
     TokioResolver,
 };
+use rustls::{crypto::ring::default_provider, pki_types::ServerName, ClientConfig};
+use rustls_platform_verifier::BuilderVerifierExt;
 use serde::{Deserialize, Serialize};
 use std::{
     net::{IpAddr, SocketAddr},
@@ -11,7 +18,14 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
-use tokio::{sync::Semaphore, task::JoinSet, time::timeout as tokio_timeout};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpStream,
+    sync::Semaphore,
+    task::JoinSet,
+    time::timeout as tokio_timeout,
+};
+use tokio_rustls::TlsConnector;
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 struct CheckResult {
@@ -262,6 +276,10 @@ async fn lookup_socket_addr(
     record_type: RecordType,
     timeout: Duration,
 ) -> Result<Vec<String>, String> {
+    if server.protocol == "tls" {
+        return lookup_dot_socket_addr(server, socket_addr, domain, record_type, timeout).await;
+    }
+
     let resolver = TokioResolver::builder_with_config(
         ResolverConfig::from_parts(
             None,
@@ -295,6 +313,115 @@ async fn lookup_socket_addr(
     answers.sort();
     answers.dedup();
     Ok(answers)
+}
+
+async fn lookup_dot_socket_addr(
+    server: &ParsedServer,
+    socket_addr: SocketAddr,
+    domain: &str,
+    record_type: RecordType,
+    timeout: Duration,
+) -> Result<Vec<String>, String> {
+    let server_name = ServerName::try_from(server.host.clone())
+        .map_err(|_| format!("invalid TLS server name: {}", server.host))?;
+    let connector = TlsConnector::from(Arc::new(
+        dot_client_config().map_err(|err| format!("TLS config error: {err}"))?,
+    ));
+
+    let stream = tokio_timeout(timeout, TcpStream::connect(socket_addr))
+        .await
+        .map_err(|_| {
+            format!(
+                "TCP connect timed out after {}",
+                humantime::format_duration(timeout)
+            )
+        })?
+        .map_err(|err| format!("TCP connect failed: {err}"))?;
+
+    let mut tls_stream = tokio_timeout(timeout, connector.connect(server_name, stream))
+        .await
+        .map_err(|_| {
+            format!(
+                "TLS handshake timed out after {}",
+                humantime::format_duration(timeout)
+            )
+        })?
+        .map_err(|err| format!("TLS handshake failed: {err}"))?;
+
+    let query = build_dns_query(domain, record_type)?;
+    let query_len = u16::try_from(query.len()).map_err(|_| "DNS query too large".to_string())?;
+    let mut frame = Vec::with_capacity(query.len() + 2);
+    frame.extend_from_slice(&query_len.to_be_bytes());
+    frame.extend_from_slice(&query);
+
+    tokio_timeout(timeout, tls_stream.write_all(&frame))
+        .await
+        .map_err(|_| {
+            format!(
+                "DNS write timed out after {}",
+                humantime::format_duration(timeout)
+            )
+        })?
+        .map_err(|err| format!("DNS write failed: {err}"))?;
+
+    let mut len_buf = [0u8; 2];
+    tokio_timeout(timeout, tls_stream.read_exact(&mut len_buf))
+        .await
+        .map_err(|_| {
+            format!(
+                "DNS response timed out after {}",
+                humantime::format_duration(timeout)
+            )
+        })?
+        .map_err(|err| format!("DNS response header failed: {err}"))?;
+
+    let response_len = u16::from_be_bytes(len_buf) as usize;
+    let mut response_buf = vec![0u8; response_len];
+    tokio_timeout(timeout, tls_stream.read_exact(&mut response_buf))
+        .await
+        .map_err(|_| {
+            format!(
+                "DNS response body timed out after {}",
+                humantime::format_duration(timeout)
+            )
+        })?
+        .map_err(|err| format!("DNS response body failed: {err}"))?;
+
+    let message = Message::from_bytes(&response_buf)
+        .map_err(|err| format!("DNS response decode failed: {err}"))?;
+    if message.metadata.response_code != ResponseCode::NoError {
+        return Err(format!(
+            "DNS response code: {}",
+            message.metadata.response_code
+        ));
+    }
+
+    let mut answers = Vec::new();
+    for record in &message.answers {
+        answers.push(format_rdata(&record.data));
+    }
+    answers.sort();
+    answers.dedup();
+    Ok(answers)
+}
+
+fn build_dns_query(domain: &str, record_type: RecordType) -> Result<Vec<u8>, String> {
+    let name = Name::from_ascii(domain)
+        .map_err(|err| format!("invalid query domain '{domain}': {err}"))?;
+    let mut message = Message::new(0, MessageType::Query, OpCode::Query);
+    message.metadata.recursion_desired = true;
+    message.add_query(Query::query(name, record_type));
+    message
+        .to_bytes()
+        .map_err(|err| format!("failed to encode DNS query: {err}"))
+}
+
+fn dot_client_config() -> Result<ClientConfig, rustls::Error> {
+    let builder = ClientConfig::builder_with_provider(Arc::new(default_provider()))
+        .with_safe_default_protocol_versions()
+        .expect("safe default TLS versions");
+    let builder = builder.with_platform_verifier()?;
+    Ok(builder.with_no_client_auth())
 }
 
 async fn resolve_socket_addrs(server: &ParsedServer) -> Result<Vec<SocketAddr>, String> {
