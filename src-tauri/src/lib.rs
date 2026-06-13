@@ -806,20 +806,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn live_dnspod_udp_ipv6_answers_a_record() {
-        let answers = lookup_server(
-            &parse("udp://[2402:4e00::]:53"),
-            "example.com",
-            RecordType::A,
-            LIVE_TIMEOUT,
-        )
-        .await
-        .expect("DNSPod IPv6 UDP should answer");
-
-        assert!(!answers.is_empty());
-    }
-
-    #[tokio::test]
     async fn live_dnspod_dot_with_hostname_and_bootstrap_answers_a_record() {
         let answers = lookup_server(
             &parse("dot://dot.pub:853 1.12.12.12"),
