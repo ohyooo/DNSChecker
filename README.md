@@ -63,6 +63,8 @@ DNSChecker/
 
 `node_modules/`、`dist/` 和 `src-tauri/target/` 等生成目录默认会被忽略。
 
+协议实现和 TLS 验证规则见 [`docs/architecture.md`](docs/architecture.md)。
+
 ## DNS 列表格式
 
 `dns_list.txt` 每行接受一个 DNS 服务器配置。
@@ -76,7 +78,7 @@ https://dns.google/dns-query 8.8.8.8
 
 第二列是可选项，用于为基于域名的 DNS 端点固定解析 IP。
 
-支持的端点形式取决于原生命令实现，但当前 UI 设计面向以下格式：
+支持的端点形式如下。每个协议只使用对应传输，不会自动回退到其他协议：
 
 - `udp://host[:port]`
 - `tcp://host[:port]`

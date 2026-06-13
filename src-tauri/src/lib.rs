@@ -322,6 +322,10 @@ async fn lookup_dot_socket_addr(
     record_type: RecordType,
     timeout: Duration,
 ) -> Result<Vec<String>, String> {
+    // hickory-net currently disables SNI for DoT. Some public resolvers,
+    // including dot.pub, require normal TLS server identity, so DoT is kept as
+    // a small explicit implementation: TCP connect, TLS with platform trust,
+    // two-byte DNS length prefix, then DNS message bytes.
     let server_name = ServerName::try_from(server.host.clone())
         .map_err(|_| format!("invalid TLS server name: {}", server.host))?;
     let connector = TlsConnector::from(Arc::new(
@@ -417,6 +421,9 @@ fn build_dns_query(domain: &str, record_type: RecordType) -> Result<Vec<u8>, Str
 }
 
 fn dot_client_config() -> Result<ClientConfig, rustls::Error> {
+    // TLS is performed by rustls, while certificate path and hostname
+    // verification are delegated to rustls-platform-verifier so the OS trust
+    // store is used on Windows/macOS/Linux.
     let builder = ClientConfig::builder_with_provider(Arc::new(default_provider()))
         .with_safe_default_protocol_versions()
         .expect("safe default TLS versions");
@@ -566,11 +573,28 @@ fn parse_host_port(
         return Ok((protocol, ip.to_string(), default_port, None));
     }
 
-    let bracketless = value.trim_matches(['[', ']']);
-    if let Some((host, port)) = split_host_port(bracketless) {
+    // RFC 3986 bracketed IPv6 authority: [addr]:port. Strip only the brackets
+    // around the host; do not trim arbitrary brackets from domain names.
+    if let Some(rest) = value.strip_prefix('[') {
+        let Some((host, remainder)) = rest.split_once(']') else {
+            return Err(format!("invalid bracketed IPv6 endpoint: {value}"));
+        };
+        if remainder.is_empty() {
+            return Ok((protocol, host.to_string(), default_port, None));
+        }
+        let Some(port_text) = remainder.strip_prefix(':') else {
+            return Err(format!("invalid bracketed IPv6 endpoint: {value}"));
+        };
+        let port = port_text
+            .parse::<u16>()
+            .map_err(|_| format!("invalid port in endpoint: {value}"))?;
         return Ok((protocol, host.to_string(), port, None));
     }
-    Ok((protocol, bracketless.to_string(), default_port, None))
+
+    if let Some((host, port)) = split_host_port(value) {
+        return Ok((protocol, host.to_string(), port, None));
+    }
+    Ok((protocol, value.to_string(), default_port, None))
 }
 
 fn parse_https_endpoint(
@@ -677,4 +701,137 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const LIVE_TIMEOUT: Duration = Duration::from_secs(8);
+
+    fn parse(input: &str) -> ParsedServer {
+        parse_server_line(1, input, &[]).expect(input)
+    }
+
+    #[test]
+    fn parses_bracketed_ipv6_udp_endpoint_without_losing_protocol_or_port() {
+        let server = parse("udp://[2400:3200:baba::1]:53");
+
+        assert_eq!(server.protocol, "udp");
+        assert_eq!(server.host, "2400:3200:baba::1");
+        assert_eq!(server.port, 53);
+    }
+
+    #[test]
+    fn parses_https_endpoint_with_ipv6_bootstrap() {
+        let server = parse("https://dns.alidns.com/dns-query [2400:3200::1]");
+
+        assert_eq!(server.protocol, "https");
+        assert_eq!(server.host, "dns.alidns.com");
+        assert_eq!(server.path.as_deref(), Some("/dns-query"));
+        assert_eq!(
+            server.bootstrap,
+            vec![IpAddr::from_str("2400:3200::1").unwrap()]
+        );
+    }
+
+    #[tokio::test]
+    async fn live_alidns_udp_ipv6_answers_a_record() {
+        let answers = lookup_server(
+            &parse("udp://[2400:3200:baba::1]:53"),
+            "example.com",
+            RecordType::A,
+            LIVE_TIMEOUT,
+        )
+        .await
+        .expect("AliDNS IPv6 UDP should answer");
+
+        assert!(!answers.is_empty());
+    }
+
+    #[tokio::test]
+    async fn live_alidns_tcp_ipv4_answers_a_record() {
+        let answers = lookup_server(
+            &parse("tcp://223.5.5.5:53"),
+            "example.com",
+            RecordType::A,
+            LIVE_TIMEOUT,
+        )
+        .await
+        .expect("AliDNS IPv4 TCP should answer");
+
+        assert!(!answers.is_empty());
+    }
+
+    #[tokio::test]
+    async fn live_alidns_dot_with_hostname_and_bootstrap_answers_a_record() {
+        let answers = lookup_server(
+            &parse("dot://dns.alidns.com:853 223.5.5.5"),
+            "example.com",
+            RecordType::A,
+            LIVE_TIMEOUT,
+        )
+        .await
+        .expect("AliDNS DoT should answer with valid system-trusted TLS");
+
+        assert!(!answers.is_empty());
+    }
+
+    #[tokio::test]
+    async fn live_alidns_doh_with_hostname_and_bootstrap_answers_a_record() {
+        let answers = lookup_server(
+            &parse("https://dns.alidns.com/dns-query 223.5.5.5"),
+            "example.com",
+            RecordType::A,
+            LIVE_TIMEOUT,
+        )
+        .await
+        .expect("AliDNS DoH should answer with valid system-trusted TLS");
+
+        assert!(!answers.is_empty());
+    }
+
+    #[tokio::test]
+    async fn live_dnspod_udp_ipv4_answers_a_record() {
+        let answers = lookup_server(
+            &parse("udp://119.29.29.29:53"),
+            "example.com",
+            RecordType::A,
+            LIVE_TIMEOUT,
+        )
+        .await
+        .expect("DNSPod IPv4 UDP should answer");
+
+        assert!(!answers.is_empty());
+    }
+
+    #[tokio::test]
+    async fn live_dnspod_dot_with_hostname_and_bootstrap_answers_a_record() {
+        let answers = lookup_server(
+            &parse("dot://dot.pub:853 1.12.12.12"),
+            "example.com",
+            RecordType::A,
+            LIVE_TIMEOUT,
+        )
+        .await
+        .expect("DNSPod DoT should answer with valid system-trusted TLS");
+
+        assert!(!answers.is_empty());
+    }
+
+    #[tokio::test]
+    async fn failed_lookup_keeps_all_upstream_errors_for_copying() {
+        let error = lookup_server(
+            &parse("udp://127.0.0.1:9"),
+            "example.com",
+            RecordType::A,
+            Duration::from_millis(200),
+        )
+        .await
+        .expect_err("closed local UDP port should fail");
+
+        assert!(error.contains("all upstream addresses failed for 127.0.0.1"));
+        assert!(error.contains("127.0.0.1:9"));
+        assert!(error.len() > "all upstream addresses failed for 127.0.0.1: 127.0.0.1:9: ".len());
+    }
 }
