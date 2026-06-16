@@ -4,6 +4,11 @@ on:
   push:
   pull_request:
   workflow_dispatch:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
 
 concurrency:
   group: build-${{ github.ref }}
@@ -113,3 +118,24 @@ jobs:
           name: dnschecker-${{ matrix.os-name }}-${{ matrix.arch }}-release
           path: ${{ matrix.artifact-release }}
           if-no-files-found: error
+
+      - name: Prepare release asset
+        if: github.event_name == 'release'
+        shell: bash
+        run: |
+          mkdir -p release-assets
+
+          NAME="dnschecker-${{ matrix.os-name }}-${{ matrix.arch }}"
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            NAME="${NAME}.exe"
+          fi
+
+          cp "${{ matrix.artifact-release }}" "release-assets/${NAME}"
+
+      - name: Upload executable to GitHub Release
+        if: github.event_name == 'release'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "${{ github.event.release.tag_name }}" release-assets/* --clobber
